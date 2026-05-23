@@ -5,9 +5,12 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import WindTurbineScene from "./components/WindTurbineModel";
 
 // --- INFLUXDB CLOUD CREDENTIALS ---
-const INFLUX_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com/api/v2/query?org=BBD";
-const INFLUX_TOKEN = "S00vfLTsHtpgVh7NsHnJSdjBDxy8SZcEkewHpwnB99sbbqTI-jAST2K45xzno8nCxHqrv2b8vWGmYKmdfv4zbw==";
+// Nuskaitome InfluxDB prisijungimo duomenis iš .env failo. 
+// 'as string' pasako TypeScript, kad šie kintamieji tikrai egzistuoja ir nėra 'undefined'.
+const INFLUX_URL = process.env.NEXT_PUBLIC_INFLUX_URL as string;
+const INFLUX_TOKEN = process.env.NEXT_PUBLIC_INFLUX_TOKEN as string;
 
+// Užklausa InfluxDB duomenų bazei: paimame paskutinius vibracijos duomenis per paskutines 60 sekundžių.
 const fluxQuery = `
   from(bucket: "turbine_data")
     |> range(start: -60s)
@@ -16,27 +19,27 @@ const fluxQuery = `
 `;
 
 export default function WindTurbineDashboard() {
-  // --- STATE MANAGEMENT ---
-  const [angle, setAngle] = useState(0);              // Rankinis tikslinis kampas (žingsninis)
-  const [turbineSpeed, setTurbineSpeed] = useState(0); // DC variklio greitis (0-255)
+  // --- STATE MANAGEMENT (Būsenų valdymas) ---
+  // Čia saugome visą kintančią informaciją, kurią atvaizduoja vartotojo sąsaja.
+  const [angle, setAngle] = useState(0);              // Rankinis tikslinis kampas (žingsninis motoras)
+  const [turbineSpeed, setTurbineSpeed] = useState(0); // DC variklio greitis (PWM signalas: 0-255)
   const [vibrationData, setVibrationData] = useState<any[]>([]);
-  const [liveWindAngle, setLiveWindAngle] = useState(0); // Gyvi AS5600 jutiklio duomenys
+  const [liveWindAngle, setLiveWindAngle] = useState(0); // Gyvi AS5600 jutiklio (vėjo krypties) duomenys
 
-  // NAUJA: Autopiloto būsenos valdymas (pagal nutylėjimą įjungtas)
-  const [isAutoYaw, setIsAutoYaw] = useState(true);
+  const [isAutoYaw, setIsAutoYaw] = useState(true); // Autopiloto būsena (sekti vėją)
 
-  // Anomalijų aptikimo būsenos valdymas
+  // Anomalijų (gedimų) aptikimo būsenos valdymas
   const [anomalyDetected, setAnomalyDetected] = useState(false);
-  const VIBRATION_THRESHOLD = 2.5; // Kritinis slenkstis m/s² (galite koreguoti pagal testus)
+  const VIBRATION_THRESHOLD = 2.5; // Kritinis vibracijos slenkstis m/s²
 
-  // Svarbu: įsitikinkite, kad IP sutampa su ESP32 nurodytu adresu!
+  // ESP32 mikrovaldiklio IP adresas vietiniame tinkle.
   const espIP = "192.168.68.111";
 
   // ==========================================
-  // HARDWARE COMMAND FUNCTIONS (Sending to ESP32)
+  // HARDWARE COMMAND FUNCTIONS (Komandos į ESP32)
   // ==========================================
 
-  // NAUJA: Funkcija valdyti ESP32 autopilotą
+  // Asinchroninė funkcija, kuri siunčia komandą į ESP32 įjungti/išjungti autopilotą.
   const toggleAutopilot = async (checked: boolean) => {
     setIsAutoYaw(checked);
     try {
@@ -46,6 +49,7 @@ export default function WindTurbineDashboard() {
     }
   };
 
+  // Siunčia norimą turbinos pasisukimo kampą į ESP32 (veikia tik jei autopilotas išjungtas).
   const sendAngleToESP = async (value: number) => {
     try {
       await fetch(`http://${espIP}/setAngle?val=${value}`);
@@ -54,6 +58,7 @@ export default function WindTurbineDashboard() {
     }
   };
 
+  // Siunčia turbinos rotoriaus sukimosi greitį (PWM reikšmę) į ESP32.
   const sendSpeedToESP = async (value: number) => {
     try {
       await fetch(`http://${espIP}/setMainMotor?speed=${value}`);
@@ -63,29 +68,31 @@ export default function WindTurbineDashboard() {
   };
 
   // ==========================================
-  // LOCAL TELEMETRY (Live AS5600 Polling)
+  // LOCAL TELEMETRY (Gyvi duomenys iš ESP32)
   // ==========================================
   useEffect(() => {
+    // Ši funkcija kas sekundę kreipiasi į ESP32 ir nuskaito faktinę vėjo kryptį.
     const fetchLiveSensors = async () => {
       try {
         const response = await fetch(`http://${espIP}/getSensorData`);
         if (response.ok) {
           const data = await response.json();
-          setLiveWindAngle(data.windAngle);
+          setLiveWindAngle(data.windAngle); // Atnaujiname UI su gautais duomenimis
         }
       } catch (error) {
-        // Nutildoma klaida, jei ESP32 persikrauna
+        // Ignoruojame klaidą, kad UI "neuzlūžtų", jei ESP32 trumpam atsijungia
       }
     };
 
     const localInterval = setInterval(fetchLiveSensors, 1000);
-    return () => clearInterval(localInterval);
+    return () => clearInterval(localInterval); // Išvalome intervalą, kai komponentas ištrinamas (cleanup)
   }, []);
 
   // ==========================================
-  // CLOUD TELEMETRY PIPELINE (Reading from AWS)
+  // CLOUD TELEMETRY PIPELINE (Duomenys iš AWS)
   // ==========================================
   useEffect(() => {
+    // Ši funkcija kas 2 sekundes kreipiasi į AWS debesiją, kad gautų vibracijos metrikas.
     const fetchVibration = async () => {
       try {
         const response = await fetch(INFLUX_URL, {
@@ -101,6 +108,7 @@ export default function WindTurbineDashboard() {
         const csvData = await response.text();
         let latestData = { x: 0, y: 0, z: 0 };
 
+        // CSV duomenų išskyrimas (parsinimas)
         const lines = csvData.split('\n');
         lines.forEach(line => {
           const cols = line.split(',');
@@ -111,22 +119,25 @@ export default function WindTurbineDashboard() {
           }
         });
 
+        // Anomalijų aptikimo logika: jei vibracija viršija slenkstį, aktyvuojamas avarinis stabdymas.
         if (latestData.z !== 0 || latestData.x !== 0) {
           const hasXAnomaly = Math.abs(latestData.x) > VIBRATION_THRESHOLD;
           const hasYAnomaly = Math.abs(latestData.y) > VIBRATION_THRESHOLD;
 
           if (hasXAnomaly || hasYAnomaly) {
             setAnomalyDetected(true);
-            setTurbineSpeed(0);   
-            sendSpeedToESP(0);    
+            setTurbineSpeed(0);   // Nustatome greitį UI lygiu į 0
+            sendSpeedToESP(0);    // Išsiunčiame komandą fiziniam ESP32 sustabdyti variklį
           }
 
+          // Formuojame naują duomenų tašką grafikui
           const newDataPoint = {
             time: new Date().toLocaleTimeString('en-GB', { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
             x: Number(latestData.x.toFixed(2)),
             y: Number(latestData.y.toFixed(2)),
             z: Number(latestData.z.toFixed(2))
           };
+          // Išsaugome tik paskutinius 20 taškų, kad grafikas nebūtų perkrautas
           setVibrationData(prevData => [...prevData.slice(-19), newDataPoint]);
         }
       } catch (error) {
@@ -138,33 +149,33 @@ export default function WindTurbineDashboard() {
     return () => clearInterval(interval);
   }, []);
 
-useEffect(() => {
-    // Check if the browser supports notifications
+  // ==========================================
+  // NOTIFICATIONS (Naršyklės pranešimai)
+  // ==========================================
+  useEffect(() => {
+    // Paprašome vartotojo leidimo rodyti "Desktop" pranešimus, kai atidaromas puslapis.
     if ("Notification" in window) {
-      // If we haven't asked for permission yet, ask now
       if (Notification.permission === "default") {
         Notification.requestPermission();
       }
     }
   }, []);
 
-  // ==========================================
-  // TRIGGER DESKTOP ALERT
-  // ==========================================
   useEffect(() => {
+    // Jei aptinkama anomalija, iššoka sistemos lygio pranešimas (alert).
     if (anomalyDetected) {
       if ("Notification" in window && Notification.permission === "granted") {
         new Notification("⚠️ TURBINE EMERGENCY!", {
           body: `Critical vibration detected (> ${VIBRATION_THRESHOLD} m/s²). Auto-shutdown initiated.`,
-          icon: "https://cdn-icons-png.flaticon.com/512/564/564246.png", // Just a warning triangle icon
-          requireInteraction: true // Keeps the notification on screen until the user dismisses it
+          icon: "https://cdn-icons-png.flaticon.com/512/564/564246.png",
+          requireInteraction: true // Pranešimas lieka ekrane, kol vartotojas jį paspaudžia
         });
       }
     }
   }, [anomalyDetected]);
 
   // ==========================================
-  // UI RENDER
+  // UI RENDER (Vartotojo sąsajos atvaizdavimas)
   // ==========================================
   return (
     <div className="min-h-screen bg-slate-900 text-white p-6 md:p-12">
@@ -183,7 +194,7 @@ useEffect(() => {
           </div>
         </header>
 
-        {/* ANOMALIJOS SKYDELIS */}
+        {/* ANOMALIJOS SKYDELIS (Rodomas tik tada, kai anomalyDetected yra true) */}
         {anomalyDetected && (
           <div className="bg-red-950/40 border-2 border-red-500 text-red-200 p-6 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-4 animate-pulse shadow-[0_0_25px_rgba(239,68,68,0.15)]">
             <div className="flex items-center gap-4">
@@ -198,6 +209,7 @@ useEffect(() => {
                 </p>
               </div>
             </div>
+            {/* Mygtukas, skirtas atšaukti avarinį rėžimą */}
             <button
               onClick={() => setAnomalyDetected(false)}
               className="w-full md:w-auto px-5 py-2 bg-red-600 hover:bg-red-500 text-white font-bold text-sm rounded-xl transition-all shadow-md active:scale-95"
@@ -240,7 +252,7 @@ useEffect(() => {
               Krypties Valdymas
             </h3>
             
-            {/* AUTOPILOTO JUNGIKLIS (NAUJA) */}
+            {/* AUTOPILOTO JUNGIKLIS */}
             <div className="w-full flex items-center justify-between mb-6 bg-slate-900/50 p-4 rounded-xl border border-slate-700">
               <label className="text-sm font-bold text-cyan-400 uppercase tracking-widest cursor-pointer flex items-center gap-3 w-full select-none">
                 <input
@@ -256,8 +268,7 @@ useEffect(() => {
               </div>
             </div>
 
-            {/* STEPPER CONTROL (YAW/DIRECTION) */}
-            {/* Pridėta 'opacity' klasė: jei autopilotas įjungtas, slankiklis patamsėja */}
+            {/* STEPPER CONTROL (Jėgainės sukiojimas) */}
             <div className={`flex flex-col items-center gap-6 w-full transition-opacity duration-300 ${isAutoYaw ? 'opacity-40' : 'opacity-100'}`}>
               <div className="w-full space-y-2 text-center">
                 <label className="text-xs uppercase tracking-widest text-slate-500">
@@ -272,10 +283,9 @@ useEffect(() => {
                     value={angle}
                     onChange={(e) => {
                       setAngle(parseInt(e.target.value));
-                      // Jei vartotojas pajudina slankiklį, automatiškai išjungiame autopilotą UI lygiu
-                      if (isAutoYaw) setIsAutoYaw(false);
+                      if (isAutoYaw) setIsAutoYaw(false); // Jei pajudiname ranka, autopilotas išjungiamas
                     }}
-                    onMouseUp={() => sendAngleToESP(angle)}
+                    onMouseUp={() => sendAngleToESP(angle)} // Komanda išsiunčiama tik kai vartotojas atleidžia pelę
                     className="w-full h-3 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
                   />
                   <span className="text-sm font-mono text-slate-400">360°</span>
@@ -297,7 +307,7 @@ useEffect(() => {
                   min="0"
                   max="255"
                   value={turbineSpeed}
-                  disabled={anomalyDetected}
+                  disabled={anomalyDetected} // Slankiklis užrakinamas, jei aptikta anomalija
                   onChange={(e) => setTurbineSpeed(parseInt(e.target.value))}
                   onMouseUp={() => sendSpeedToESP(turbineSpeed)}
                   className={`w-full h-3 rounded-lg appearance-none cursor-pointer accent-emerald-500 ${anomalyDetected ? 'bg-slate-800 cursor-not-allowed opacity-50' : 'bg-slate-700'}`}
@@ -312,7 +322,7 @@ useEffect(() => {
               <button
                 onClick={() => {
                   setTurbineSpeed(0);
-                  sendSpeedToESP(0);
+                  sendSpeedToESP(0); // Skubiai išsiunčia komandą sustabdyti variklį
                 }}
                 className="mt-6 w-full py-3 rounded-lg font-bold text-sm bg-red-600/20 border border-red-500/50 hover:bg-red-500 text-red-200 hover:text-white transition-all shadow-[0_0_15px_rgba(239,68,68,0.2)]"
               >
@@ -323,7 +333,7 @@ useEffect(() => {
           </div>
         </div>
 
-        {/* CLOUD VIBRATION TELEMETRY */}
+        {/* CLOUD VIBRATION TELEMETRY (Vibracijų grafikas) */}
         <div className="bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700 mt-8">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-xl font-bold text-cyan-400">AWS InfluxDB Telemetry</h3>
@@ -338,6 +348,7 @@ useEffect(() => {
           
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
+              {/* Recharts bibliotekos komponentas, brėžiantis linijinį grafiką */}
               <LineChart data={vibrationData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                 <XAxis dataKey="time" stroke="#94a3b8" fontSize={12} />
